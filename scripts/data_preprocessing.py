@@ -1,84 +1,108 @@
 import pandas as pd
-import re
-from data_extraction import extract_all_data
+import os
 
+from scripts.common import load_config
 
-def normalize_text(value: str) -> str:
-    """Convert text to lowercase and strip whitespace."""
-    return value.strip().lower() if isinstance(value, str) else value
+config = load_config()
+PARQUET_DIR = os.path.join(config.get("paths.processed_data"), "parquet")
 
+def normalize_text(value):
+    if pd.isnull(value):
+        return None
+    return str(value).strip().lower()
 
-def normalize_phone(value: str) -> str:
-    """Normalize phone numbers to a consistent format (digits only)."""
-    return re.sub(r"\D", "", value) if isinstance(value, str) else value
+def normalize_phone(phone):
+    if pd.isnull(phone):
+        return None
+    return "".join(filter(str.isdigit, str(phone)))
 
+def normalize_date(date, date_format="%Y-%m-%d"):
+    """
+    Normalize dates to a standard format using pandas.to_datetime.
+    """
+    if pd.isnull(date):
+        return None
 
-def preprocess_clinic_data(df: pd.DataFrame) -> pd.DataFrame:
-    """Preprocess clinic data."""
-    df["first_name"] = df["first_name"].apply(normalize_text)
-    df["last_name"] = df["last_name"].apply(normalize_text)
-    df["phone_number"] = df["phone_number"].apply(normalize_phone)
-    df["email"] = df["email"].apply(normalize_text)
-    df["address"] = df["address"].apply(normalize_text)
+    try:
+        parsed_date = pd.to_datetime(date, errors="coerce")
+        if pd.isnull(parsed_date):
+            print(f"Warning: Unable to parse date '{date}'")
+            return None
+
+        return parsed_date.strftime(date_format)
+    except Exception as e:
+        print(f"Error parsing date '{date}': {e}")
+        return None
+
+def flatten_address(address):
+    if isinstance(address, dict):
+        return ", ".join(str(value) for value in address.values() if value)
+    if pd.isnull(address):
+        return None
+    return str(address) 
+
+def preprocess_source_data(df: pd.DataFrame, source: str) -> pd.DataFrame:
+    """
+    Preprocess data for a specific source based on field mappings.
+    """
+    if "id" not in df.columns:
+        df = df.reset_index(drop=True) 
+        df["id"] = df.index + 1  
+
+    field_mappings = config.get(f"field_mappings.{source}", {})
+    for source_field, target_field in field_mappings.items():
+        if source_field in df.columns:
+            df[target_field] = df[source_field]
+
+    if source == "physical_therapy" and "full_name" in df.columns:
+        df["first_name"] = df["full_name"].str.extract(r"^(\S+)", expand=False)
+        df["last_name"] = df["full_name"].str.extract(r"\s+(.+)$", expand=False)
+
+    for field in df.columns:
+        if "date" in field:
+            print(f"Normalizing {field} for {source}...")
+            df[field] = df[field].apply(normalize_date)
+        elif "address" in field:
+            print(f"Normalizing {field} for {source}...")
+            df[field] = df[field].apply(flatten_address)
+        elif "phone" in field:
+            print(f"Normalizing {field} for {source}...")
+            df[field] = df[field].apply(normalize_phone)
+        elif field in ["first_name", "last_name", "email"]:
+            print(f"Normalizing {field} for {source}...")
+            df[field] = df[field].apply(normalize_text)
+
+    dedupe_fields = ["first_name", "last_name", "email", "phone_number", "address", "date_of_birth"]
+    for field in dedupe_fields:
+        if field in df.columns:
+            df[field] = df[field].apply(lambda x: str(x) if pd.notnull(x) else None)
+
     return df
 
+def preprocess_all_data():
+    """Load cleaned data from Parquet, preprocess it, and save back to Parquet."""
+    datasets = {}
+    for source in ["clinic", "urgent_care", "hospital", "physical_therapy"]:
+        input_path = os.path.join(PARQUET_DIR, f"{source}_cleaned.parquet")
+        output_path = os.path.join(PARQUET_DIR, f"{source}_preprocessed.parquet")
 
-def preprocess_urgent_care_data(df: pd.DataFrame) -> pd.DataFrame:
-    """Preprocess urgent care data."""
-    df["first_name"] = df["first_name"].apply(normalize_text)
-    df["last_name"] = df["last_name"].apply(normalize_text)
-    df["dob"] = pd.to_datetime(df["dob"]).dt.strftime("%Y-%m-%d")
-    df["phone"] = df["phone"].apply(normalize_phone)
-    df["email"] = df["email"].apply(normalize_text)
-    df["address_line"] = df["address_line"].apply(normalize_text)
-    return df
+        if os.path.exists(input_path):
+            print(f"Loading {source} data from {input_path}...")
+            df = pd.read_parquet(input_path)
 
+            df = preprocess_source_data(df, source)
 
-def preprocess_hospital_data(df: pd.DataFrame) -> pd.DataFrame:
-    """Preprocess hospital data."""
-    df["first_name"] = df["first_name"].apply(normalize_text)
-    df["middle_name"] = df["middle_name"].apply(normalize_text)
-    df["last_name"] = df["last_name"].apply(normalize_text)
-    df["date_of_birth"] = pd.to_datetime(df["date_of_birth"]).dt.strftime("%Y-%m-%d")
-    df["phone_number"] = df["phone_number"].apply(normalize_phone)
-    df["email_address"] = df["email_address"].apply(normalize_text)
-    df["address"] = df["address"].apply(lambda x: {k: normalize_text(v) for k, v in x.items()})
-    return df
+            if "id" not in df.columns:
+                raise ValueError(f"'id' column is missing for {source} data")
 
+            print(f"Saving preprocessed {source} data to {output_path}...")
+            df.to_parquet(output_path, index=False)
+            datasets[source] = df
+        else:
+            print(f"Warning: {input_path} does not exist!")
 
-def preprocess_physical_therapy_data(df: pd.DataFrame) -> pd.DataFrame:
-    """Preprocess physical therapy data."""
-    df["full_name"] = df["full_name"].apply(normalize_text)
-    df["first_name"] = df["full_name"].str.extract(r"^(\S+)")
-    df["last_name"] = df["full_name"].str.extract(r"\s+(.+)$")
-    df["dob"] = pd.to_datetime(df["dob"]).dt.strftime("%Y-%m-%d")
-    df["contact_phone"] = df["contact_phone"].apply(normalize_phone)
-    df["email"] = df["email"].apply(normalize_text)
-    df["street_address"] = df["street_address"].apply(normalize_text)
-    df["city"] = df["city"].apply(normalize_text)
-    df["state"] = df["state"].apply(normalize_text)
-    return df
-
-
-def preprocess_all_data(data: dict) -> dict:
-    """Preprocess all data sources."""
-    preprocessed_data = {}
-    preprocessed_data["clinic"] = preprocess_clinic_data(data["clinic"])
-    preprocessed_data["urgent_care"] = preprocess_urgent_care_data(data["urgent_care"])
-    preprocessed_data["hospital"] = preprocess_hospital_data(data["hospital"])
-    preprocessed_data["physical_therapy"] = preprocess_physical_therapy_data(data["physical_therapy"])
-    return preprocessed_data
+    return datasets
 
 
 if __name__ == "__main__":
-    # Extract raw data
-    raw_data = extract_all_data()
-
-    # Preprocess data
-    clean_data = preprocess_all_data(raw_data)
-
-    # Print summaries of cleaned data
-    for source, df in clean_data.items():
-        print(f"Cleaned data from {source}:")
-        print(df.info())
-        print(df.head())
+    preprocess_all_data()
