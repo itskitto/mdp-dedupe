@@ -169,3 +169,10 @@ cython_debug/
 
 # PyPI configuration file
 .pypirc
+
+.DS_Store
+
+# Ignore raw and temporary data
+data/raw/*
+data/processed/*
+!data/processed/.gitkeep
