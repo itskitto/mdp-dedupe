@@ -175,4 +175,5 @@ cython_debug/
 # Ignore raw and temporary data
 data/raw/*
 data/processed/*
+data/results/*
 !data/processed/.gitkeep
