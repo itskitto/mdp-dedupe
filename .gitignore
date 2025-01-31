@@ -171,6 +171,7 @@ cython_debug/
 .pypirc
 
 .DS_Store
+.vscode
 
 # Ignore raw and temporary data
 data/raw/*
